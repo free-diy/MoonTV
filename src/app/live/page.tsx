@@ -4,14 +4,19 @@
 
 import { Suspense, useEffect, useRef, useState } from 'react';
 
-import Artplayer from 'artplayer';
 import Hls from 'hls.js';
-import { Heart, Radio, Search, Tv, X } from 'lucide-react';
+import { Heart, Radio, RefreshCw, Search, Tv, X } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 
 import {
   debounce,
 } from '@/lib/channel-search';
+import {
+  isMobile,
+  isTablet, 
+  isSafari,
+  devicePerformance
+} from '@/lib/utils';
 import {
   deleteFavorite,
   generateStorageKey,
@@ -92,6 +97,24 @@ function LivePageClient() {
 
   // 切换直播源状态
   const [isSwitchingSource, setIsSwitchingSource] = useState(false);
+  
+  // 刷新相关状态
+  const [isRefreshingSource, setIsRefreshingSource] = useState(false);
+  const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('live-auto-refresh-enabled');
+      return saved ? JSON.parse(saved) : false;
+    }
+    return false;
+  });
+  const [autoRefreshInterval, setAutoRefreshInterval] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('live-auto-refresh-interval');
+      return saved ? parseInt(saved) : 30; // 默认30分钟
+    }
+    return 30;
+  });
+  const autoRefreshTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // 分组相关
   const [groupedChannels, setGroupedChannels] = useState<{ [key: string]: LiveChannel[] }>({});
@@ -233,6 +256,65 @@ function LivePageClient() {
   // -----------------------------------------------------------------------------
   // 工具函数（Utils）
   // -----------------------------------------------------------------------------
+
+  // 刷新直播源
+  const refreshLiveSources = async () => {
+    if (isRefreshingSource) return;
+    
+    setIsRefreshingSource(true);
+    try {
+      console.log('开始刷新直播源...');
+      
+      // 调用后端刷新API
+      const response = await fetch('/api/admin/live/refresh', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+      
+      if (!response.ok) {
+        throw new Error('刷新直播源失败');
+      }
+      
+      const result = await response.json();
+      if (!result.success) {
+        throw new Error(result.error || '刷新直播源失败');
+      }
+      
+      console.log('直播源刷新成功');
+      
+      // 重新获取直播源列表
+      await fetchLiveSources();
+      
+    } catch (error) {
+      console.error('刷新直播源失败:', error);
+      // 这里可以显示错误提示，但不设置全局error状态
+    } finally {
+      setIsRefreshingSource(false);
+    }
+  };
+  
+  // 设置自动刷新
+  const setupAutoRefresh = () => {
+    // 清除现有定时器
+    if (autoRefreshTimerRef.current) {
+      clearInterval(autoRefreshTimerRef.current);
+      autoRefreshTimerRef.current = null;
+    }
+    
+    if (autoRefreshEnabled) {
+      const intervalMs = autoRefreshInterval * 60 * 1000; // 转换为毫秒
+      autoRefreshTimerRef.current = setInterval(() => {
+        console.log(`自动刷新直播源 (间隔: ${autoRefreshInterval}分钟)`);
+        refreshLiveSources();
+      }, intervalMs);
+      
+      console.log(`自动刷新已启用，间隔: ${autoRefreshInterval}分钟`);
+    } else {
+      console.log('自动刷新已禁用');
+    }
+  };
 
   // 获取直播源列表
   const fetchLiveSources = async () => {
@@ -468,6 +550,10 @@ function LivePageClient() {
 
     // 重置不支持的类型状态
     setUnsupportedType(null);
+
+    // 重置错误计数器
+    keyLoadErrorCount = 0;
+    lastErrorTime = 0;
 
     setCurrentChannel(channel);
     setVideoUrl(channel.url);
@@ -764,6 +850,32 @@ function LivePageClient() {
     return unsubscribe;
   }, [currentSource, currentChannel]);
 
+  // 监听自动刷新设置变化
+  useEffect(() => {
+    setupAutoRefresh();
+    
+    // 清理函数
+    return () => {
+      if (autoRefreshTimerRef.current) {
+        clearInterval(autoRefreshTimerRef.current);
+        autoRefreshTimerRef.current = null;
+      }
+    };
+  }, [autoRefreshEnabled, autoRefreshInterval]);
+
+  // 保存自动刷新配置到localStorage
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('live-auto-refresh-enabled', JSON.stringify(autoRefreshEnabled));
+    }
+  }, [autoRefreshEnabled]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('live-auto-refresh-interval', autoRefreshInterval.toString());
+    }
+  }, [autoRefreshInterval]);
+
   // 当分组切换时，将激活的分组标签滚动到视口中间
   useEffect(() => {
     if (!selectedGroup || !groupContainerRef.current) return;
@@ -835,6 +947,12 @@ function LivePageClient() {
     }
   }
 
+  // 错误重试状态管理
+  let keyLoadErrorCount = 0;
+  let lastErrorTime = 0;
+  const MAX_KEY_ERRORS = 3;
+  const ERROR_TIMEOUT = 10000; // 10秒内超过3次keyLoadError就认为频道不可用
+
   function m3u8Loader(video: HTMLVideoElement, url: string) {
     if (!Hls) {
       console.error('HLS.js 未加载');
@@ -851,15 +969,74 @@ function LivePageClient() {
       }
     }
 
-    const hls = new Hls({
+    // 基于最新 hls.js 源码和设备性能的智能配置
+    const hlsConfig = {
       debug: false,
-      enableWorker: true,
-      lowLatencyMode: true,
-      maxBufferLength: 30,
-      backBufferLength: 30,
-      maxBufferSize: 60 * 1000 * 1000,
+      
+      // Worker 配置 - 根据设备性能和浏览器能力
+      enableWorker: !isMobile && !isSafari && devicePerformance !== 'low',
+      
+      // 低延迟模式 - 仅在高性能非移动设备上启用 (源码默认为true)
+      lowLatencyMode: !isMobile && devicePerformance === 'high',
+      
+      // 缓冲管理优化 - 参考 hls.js 源码默认值进行设备优化
+      backBufferLength: devicePerformance === 'low' ? 30 : Infinity, // 源码默认 Infinity
+      maxBufferLength: devicePerformance === 'low' ? 20 :
+                      devicePerformance === 'medium' ? 30 : 30, // 源码默认 30
+      maxBufferSize: devicePerformance === 'low' ? 30 * 1000 * 1000 :
+                    devicePerformance === 'medium' ? 60 * 1000 * 1000 : 60 * 1000 * 1000, // 源码默认 60MB
+      maxBufferHole: 0.1, // 源码默认值，允许小的缓冲区空洞
+      
+      // Gap Controller 配置 - 缓冲区空洞处理 (源码中的默认值)
+      nudgeOffset: 0.1,   // 跳过小间隙的偏移量
+      nudgeMaxRetry: 3,   // 最大重试次数 (源码默认)
+      
+      // 自适应比特率优化 - 参考源码默认值
+      abrEwmaDefaultEstimate: devicePerformance === 'low' ? 500000 :
+                             devicePerformance === 'medium' ? 500000 : 500000, // 源码默认 500k
+      abrBandWidthFactor: 0.95, // 源码默认
+      abrBandWidthUpFactor: 0.7, // 源码默认
+      abrMaxWithRealBitrate: false, // 源码默认
+      maxStarvationDelay: 4, // 源码默认
+      maxLoadingDelay: 4, // 源码默认
+      
+      // 直播流特殊配置
+      startLevel: undefined, // 源码默认，自动选择起始质量
+      capLevelToPlayerSize: false, // 源码默认
+      
+      // 渐进式加载 (直播流建议关闭)
+      progressive: false,
+      
+      // 浏览器特殊优化
+      liveDurationInfinity: false, // 源码默认，Safari兼容
+      
+      // 移动设备网络优化 - 使用新的LoadPolicy配置
+      ...(isMobile && {
+        // 使用 fragLoadPolicy 替代旧的配置方式
+        fragLoadPolicy: {
+          default: {
+            maxTimeToFirstByteMs: 8000,
+            maxLoadTimeMs: 20000,
+            timeoutRetry: {
+              maxNumRetry: 2,
+              retryDelayMs: 1000,
+              maxRetryDelayMs: 8000,
+              backoff: 'linear' as const
+            },
+            errorRetry: {
+              maxNumRetry: 3,
+              retryDelayMs: 1000,
+              maxRetryDelayMs: 8000,
+              backoff: 'linear' as const
+            }
+          }
+        }
+      }),
+      
       loader: CustomHlsJsLoader,
-    });
+    };
+
+    const hls = new Hls(hlsConfig);
 
     hls.loadSource(url);
     hls.attachMedia(video);
@@ -868,27 +1045,146 @@ function LivePageClient() {
     hls.on(Hls.Events.ERROR, function (event: any, data: any) {
       console.error('HLS Error:', event, data);
 
+      // 使用最新版本的错误详情类型
+      if (data.details === Hls.ErrorDetails.KEY_LOAD_ERROR) {
+        const currentTime = Date.now();
+        
+        // 重置计数器（如果距离上次错误超过10秒）
+        if (currentTime - lastErrorTime > ERROR_TIMEOUT) {
+          keyLoadErrorCount = 0;
+        }
+        
+        keyLoadErrorCount++;
+        lastErrorTime = currentTime;
+        
+        console.warn(`KeyLoadError count: ${keyLoadErrorCount}/${MAX_KEY_ERRORS}`);
+        
+        // 如果短时间内keyLoadError次数过多，认为这个频道不可用
+        if (keyLoadErrorCount >= MAX_KEY_ERRORS) {
+          console.error('Too many keyLoadErrors, marking channel as unavailable');
+          setUnsupportedType('channel-unavailable');
+          setIsVideoLoading(false);
+          hls.destroy();
+          return;
+        }
+        
+        // 使用指数退避重试策略
+        if (keyLoadErrorCount <= 2) {
+          setTimeout(() => {
+            try {
+              hls.startLoad();
+            } catch (e) {
+              console.warn('Failed to restart load after key error:', e);
+            }
+          }, 1000 * keyLoadErrorCount);
+        }
+        return;
+      }
+
+      // 处理其他特定错误类型
+      if (data.details === Hls.ErrorDetails.BUFFER_INCOMPATIBLE_CODECS_ERROR) {
+        console.error('Incompatible codecs error - fatal');
+        setUnsupportedType('codec-incompatible');
+        setIsVideoLoading(false);
+        hls.destroy();
+        return;
+      }
+
       if (data.fatal) {
         switch (data.type) {
           case Hls.ErrorTypes.NETWORK_ERROR:
-            hls.startLoad();
+            console.log('Network error, attempting to recover...');
+            
+            // 根据具体的网络错误类型进行处理
+            if (data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR) {
+              console.log('Manifest load error, attempting reload...');
+              setTimeout(() => {
+                try {
+                  hls.loadSource(url);
+                } catch (e) {
+                  console.error('Failed to reload source:', e);
+                }
+              }, 2000);
+            } else {
+              try {
+                hls.startLoad();
+              } catch (e) {
+                console.error('Failed to restart after network error:', e);
+              }
+            }
             break;
+            
           case Hls.ErrorTypes.MEDIA_ERROR:
-            // hls.recoverMediaError();
+            console.log('Media error, attempting to recover...');
+            try {
+              hls.recoverMediaError();
+            } catch (e) {
+              console.error('Failed to recover from media error, trying audio codec swap:', e);
+              try {
+                // 使用音频编解码器交换作为备选方案
+                hls.swapAudioCodec();
+                hls.recoverMediaError();
+              } catch (swapError) {
+                console.error('Audio codec swap also failed:', swapError);
+                setUnsupportedType('media-error');
+                setIsVideoLoading(false);
+              }
+            }
             break;
+            
           default:
+            console.log('Fatal error, destroying HLS instance');
+            setUnsupportedType('fatal-error');
+            setIsVideoLoading(false);
             hls.destroy();
             break;
         }
       }
     });
+
+    // 添加性能监控和缓冲管理事件
+    hls.on(Hls.Events.FRAG_LOADED, (event, data) => {
+      if (data.frag.stats && data.frag.stats.loading && data.frag.stats.loaded) {
+        const loadTime = data.frag.stats.loading.end - data.frag.stats.loading.start;
+        if (loadTime > 0 && data.frag.stats.loaded > 0) {
+          const throughputBps = (data.frag.stats.loaded * 8 * 1000) / loadTime; // bits per second
+          const throughputMbps = throughputBps / 1000000;
+          if (process.env.NODE_ENV === 'development') {
+            console.log(`Fragment loaded: ${loadTime.toFixed(2)}ms, size: ${data.frag.stats.loaded}B, throughput: ${throughputMbps.toFixed(2)} Mbps`);
+          }
+        }
+      }
+    });
+
+    // 监听缓冲区卡顿和自动恢复
+    hls.on(Hls.Events.ERROR, (event, data) => {
+      if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
+        console.warn('Buffer stalled, attempting recovery...');
+        // 不做任何操作，让 HLS.js 自动处理
+      } else if (data.details === Hls.ErrorDetails.BUFFER_SEEK_OVER_HOLE) {
+        console.warn('Buffer hole detected, HLS.js will handle seeking...');
+        // 不做任何操作，让 HLS.js 自动跳过空洞
+      }
+    });
+
+    // 监听质量切换
+    hls.on(Hls.Events.LEVEL_SWITCHED, (event, data) => {
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`Quality switched to level ${data.level}`);
+      }
+    });
+
+    // 监听缓冲区清理事件
+    hls.on(Hls.Events.BUFFER_FLUSHED, (event, data) => {
+      console.log('Buffer flushed:', data);
+    });
   }
 
   // 播放器初始化
   useEffect(() => {
-    const preload = async () => {
+    // 异步初始化播放器，避免SSR问题
+    const initPlayer = async () => {
       if (
-        !Artplayer ||
         !Hls ||
         !videoUrl ||
         !artRef.current ||
@@ -904,32 +1200,18 @@ function LivePageClient() {
         cleanupPlayer();
       }
 
-      // precheck type
-      let type = 'm3u8';
-      const precheckUrl = `/api/live/precheck?url=${encodeURIComponent(videoUrl)}&moontv-source=${currentSourceRef.current?.key || ''}`;
-      const precheckResponse = await fetch(precheckUrl);
-      if (!precheckResponse.ok) {
-        console.error('预检查失败:', precheckResponse.statusText);
-        return;
-      }
-      const precheckResult = await precheckResponse.json();
-      if (precheckResult.success) {
-        type = precheckResult.type;
-      }
-
-      // 如果不是 m3u8 类型，设置不支持的类型并返回
-      if (type !== 'm3u8') {
-        setUnsupportedType(type);
-        setIsVideoLoading(false);
-        return;
-      }
-
+      // 根据hls.js源码设计，直接让hls.js处理各种媒体类型和错误
+      // 不需要预检查，hls.js会在加载时自动检测和处理
+      
       // 重置不支持的类型
       setUnsupportedType(null);
 
       const customType = { m3u8: m3u8Loader };
       const targetUrl = `/api/proxy/m3u8?url=${encodeURIComponent(videoUrl)}&moontv-source=${currentSourceRef.current?.key || ''}`;
       try {
+        // 使用动态导入的 Artplayer
+        const Artplayer = (window as any).DynamicArtplayer;
+        
         // 创建新的播放器实例
         Artplayer.USE_RAF = true;
 
@@ -968,7 +1250,7 @@ function LivePageClient() {
             crossOrigin: 'anonymous',
             preload: 'metadata',
           },
-          type: type,
+          type: 'm3u8',
           customType: customType,
           icons: {
             loading:
@@ -1014,9 +1296,25 @@ function LivePageClient() {
         console.error('创建播放器失败:', err);
         // 不设置错误，只记录日志
       }
-    }
-    preload();
-  }, [Artplayer, Hls, videoUrl, currentChannel, loading]);
+    }; // 结束 initPlayer 函数
+
+    // 动态导入 ArtPlayer 并初始化
+    const loadAndInit = async () => {
+      try {
+        const { default: Artplayer } = await import('artplayer');
+        
+        // 将导入的模块设置为全局变量供 initPlayer 使用
+        (window as any).DynamicArtplayer = Artplayer;
+        
+        await initPlayer();
+      } catch (error) {
+        console.error('动态导入 ArtPlayer 失败:', error);
+        // 不设置错误，只记录日志
+      }
+    };
+
+    loadAndInit();
+  }, [Hls, videoUrl, currentChannel, loading]);
 
   // 清理播放器资源
   useEffect(() => {
@@ -1298,14 +1596,20 @@ function LivePageClient() {
                       </div>
                       <div className='space-y-4'>
                         <h3 className='text-xl font-semibold text-white'>
-                          暂不支持的直播流类型
+                          {unsupportedType === 'channel-unavailable' ? '该频道暂时不可用' : '暂不支持的直播流类型'}
                         </h3>
                         <div className='bg-orange-500/20 border border-orange-500/30 rounded-lg p-4'>
                           <p className='text-orange-300 font-medium'>
-                            当前频道直播流类型：<span className='text-white font-bold'>{unsupportedType.toUpperCase()}</span>
+                            {unsupportedType === 'channel-unavailable' 
+                              ? '频道可能需要特殊访问权限或链接已过期'
+                              : `当前频道直播流类型：${unsupportedType.toUpperCase()}`
+                            }
                           </p>
                           <p className='text-sm text-orange-200 mt-2'>
-                            目前仅支持 M3U8 格式的直播流
+                            {unsupportedType === 'channel-unavailable'
+                              ? '请联系IPTV提供商或尝试其他频道'
+                              : '目前仅支持 M3U8 格式的直播流'
+                            }
                           </p>
                         </div>
                         <p className='text-sm text-gray-300'>
@@ -1603,6 +1907,53 @@ function LivePageClient() {
                 {/* 直播源 Tab 内容 */}
                 {activeTab === 'sources' && (
                   <div className='flex flex-col h-full mt-4'>
+                    {/* 刷新控制区域 */}
+                    <div className='mb-4 -mx-6 px-6 flex-shrink-0 space-y-3'>
+                      {/* 手动刷新按钮 */}
+                      <div className='flex gap-2'>
+                        <button
+                          onClick={refreshLiveSources}
+                          disabled={isRefreshingSource}
+                          className='flex items-center gap-2 px-3 py-2 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-400 text-white text-sm rounded-lg transition-colors flex-1'
+                        >
+                          <RefreshCw className={`w-4 h-4 ${isRefreshingSource ? 'animate-spin' : ''}`} />
+                          {isRefreshingSource ? '刷新中...' : '刷新源'}
+                        </button>
+                      </div>
+                      
+                      {/* 自动刷新控制 */}
+                      <div className='flex items-center gap-3'>
+                        <div className='flex items-center gap-2'>
+                          <input
+                            type='checkbox'
+                            id='autoRefresh'
+                            checked={autoRefreshEnabled}
+                            onChange={(e) => setAutoRefreshEnabled(e.target.checked)}
+                            className='rounded text-green-500 focus:ring-green-500'
+                          />
+                          <label htmlFor='autoRefresh' className='text-sm text-gray-700 dark:text-gray-300'>
+                            自动刷新
+                          </label>
+                        </div>
+                        
+                        {autoRefreshEnabled && (
+                          <div className='flex items-center gap-2'>
+                            <select
+                              value={autoRefreshInterval}
+                              onChange={(e) => setAutoRefreshInterval(Number(e.target.value))}
+                              className='text-xs px-2 py-1 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100'
+                            >
+                              <option value={10}>10分钟</option>
+                              <option value={15}>15分钟</option>
+                              <option value={30}>30分钟</option>
+                              <option value={60}>1小时</option>
+                              <option value={120}>2小时</option>
+                            </select>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    
                     <div className='flex-1 overflow-y-auto space-y-2 pb-20'>
                       {liveSources.length > 0 ? (
                         liveSources.map((source) => {

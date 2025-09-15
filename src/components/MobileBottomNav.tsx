@@ -2,7 +2,7 @@
 
 'use client';
 
-import { Cat, Clover, Film, Home, Radio, Star, Tv } from 'lucide-react';
+import { Box, Cat, Clover, Film, Home, PlaySquare, Radio, Star, Tv } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
@@ -33,6 +33,11 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
       href: '/douban?type=tv',
     },
     {
+      icon: PlaySquare,
+      label: '短剧',
+      href: '/shortdrama',
+    },
+    {
       icon: Cat,
       label: '动漫',
       href: '/douban?type=anime',
@@ -46,6 +51,11 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
       icon: Radio,
       label: '直播',
       href: '/live',
+    },
+    {
+      icon: Box,
+      label: '盒子',
+      href: '/tvbox',
     },
   ]);
 
@@ -73,7 +83,8 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
     return (
       decodedActive === decodedItemHref ||
       (decodedActive.startsWith('/douban') &&
-        decodedActive.includes(`type=${typeMatch}`))
+        decodedActive.includes(`type=${typeMatch}`)) ||
+      (href === '/shortdrama' && decodedActive.startsWith('/shortdrama'))
     );
   };
 
@@ -94,7 +105,10 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
             <li
               key={item.href}
               className='flex-shrink-0'
-              style={{ width: '20vw', minWidth: '20vw' }}
+              style={{ 
+                width: `${100 / navItems.length}vw`, 
+                minWidth: `${100 / navItems.length}vw` 
+              }}
             >
               <Link
                 href={item.href}

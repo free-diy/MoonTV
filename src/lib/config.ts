@@ -209,10 +209,10 @@ async function getInitConfig(configFile: string, subConfig: {
         Number(process.env.NEXT_PUBLIC_SEARCH_MAX_PAGE) || 5,
       SiteInterfaceCacheTime: cfgFile.cache_time || 7200,
       DoubanProxyType:
-        process.env.NEXT_PUBLIC_DOUBAN_PROXY_TYPE || 'cmliussss-cdn-tencent',
+        process.env.NEXT_PUBLIC_DOUBAN_PROXY_TYPE || 'direct',
       DoubanProxy: process.env.NEXT_PUBLIC_DOUBAN_PROXY || '',
       DoubanImageProxyType:
-        process.env.NEXT_PUBLIC_DOUBAN_IMAGE_PROXY_TYPE || 'cmliussss-cdn-tencent',
+        process.env.NEXT_PUBLIC_DOUBAN_IMAGE_PROXY_TYPE || 'direct',
       DoubanImageProxy: process.env.NEXT_PUBLIC_DOUBAN_IMAGE_PROXY || '',
       DisableYellowFilter:
         process.env.NEXT_PUBLIC_DISABLE_YELLOW_FILTER === 'true',
@@ -339,6 +339,40 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
   }
   if (!adminConfig.LiveConfig || !Array.isArray(adminConfig.LiveConfig)) {
     adminConfig.LiveConfig = [];
+  }
+  
+  // 确保网盘搜索配置有默认值
+  if (!adminConfig.NetDiskConfig) {
+    adminConfig.NetDiskConfig = {
+      enabled: true,                                    // 默认启用
+      pansouUrl: 'https://so.252035.xyz',               // 默认公益服务
+      timeout: 30,                                      // 默认30秒超时
+      enabledCloudTypes: ['baidu', 'aliyun', 'quark'] // 默认只启用百度、阿里、夸克三大主流网盘
+    };
+  }
+
+  // 确保AI推荐配置有默认值
+  if (!adminConfig.AIRecommendConfig) {
+    adminConfig.AIRecommendConfig = {
+      enabled: false,                                   // 默认关闭
+      apiUrl: 'https://api.openai.com/v1',             // 默认OpenAI API
+      apiKey: '',                                       // 默认为空，需要管理员配置
+      model: 'gpt-3.5-turbo',                          // 默认模型
+      temperature: 0.7,                                // 默认温度
+      maxTokens: 3000                                  // 默认最大token数
+    };
+  }
+
+  // 确保YouTube配置有默认值
+  if (!adminConfig.YouTubeConfig) {
+    adminConfig.YouTubeConfig = {
+      enabled: false,                                   // 默认关闭
+      apiKey: '',                                       // 默认为空，需要管理员配置
+      enableDemo: true,                                 // 默认启用演示模式
+      maxResults: 25,                                   // 默认每页25个结果
+      enabledRegions: ['US', 'CN', 'JP', 'KR', 'GB', 'DE', 'FR'], // 默认启用的地区
+      enabledCategories: ['Film & Animation', 'Music', 'Gaming', 'News & Politics', 'Entertainment'] // 默认启用的分类
+    };
   }
 
   // 站长变更自检
