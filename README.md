@@ -71,9 +71,9 @@
 
 ```yml
 services:
-  moontv-core:
-    image: ghcr.io/moontechlab/lunatv:latest
-    container_name: moontv-core
+  moontv:
+    image: ghcr.io/free-diy/lunatv:latest
+    container_name: moontv
     restart: on-failure
     ports:
       - '3000:3000'
@@ -89,7 +89,7 @@ services:
       - moontv-kvrocks
   moontv-kvrocks:
     image: apache/kvrocks
-    container_name: moontv-kvrocks
+    container_name: kvrocks
     restart: unless-stopped
     volumes:
       - kvrocks-data:/var/lib/kvrocks
@@ -106,9 +106,9 @@ volumes:
 
 ```yml
 services:
-  moontv-core:
-    image: ghcr.io/moontechlab/lunatv:latest
-    container_name: moontv-core
+  moontv:
+    image: ghcr.io/free-diy/lunatv:latest
+    container_name: moontv
     restart: on-failure
     ports:
       - '3000:3000'
@@ -124,7 +124,7 @@ services:
       - moontv-redis
   moontv-redis:
     image: redis:alpine
-    container_name: moontv-redis
+    container_name: redis
     restart: unless-stopped
     networks:
       - moontv-network
@@ -143,9 +143,9 @@ networks:
 3. 使用如下 docker compose
 ```yml
 services:
-  moontv-core:
-    image: ghcr.io/moontechlab/lunatv:latest
-    container_name: moontv-core
+  moontv:
+    image: ghcr.io/free-diy/lunatv:latest
+    container_name: moontv
     restart: on-failure
     ports:
       - '3000:3000'
